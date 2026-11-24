@@ -14,6 +14,16 @@ exportiert werden.
 | `sw.js` | Service Worker für den Offline-Betrieb |
 | `manifest.webmanifest` | PWA-Manifest (installierbar am Startbildschirm) |
 | `icon-192.png`, `icon-512.png` | App-Icons |
+| `THIRD-PARTY-LICENSES.md`, `LICENSES/` | Lizenzhinweise für die mitgelieferte Fremdbibliothek |
+
+## Lizenzen
+
+`html5-qrcode.min.js` stammt aus dem Projekt
+[html5-qrcode](https://github.com/mebjas/html5-qrcode) und enthält
+[ZXing-js](https://github.com/zxing-js/library). Beide stehen unter der
+Apache License 2.0. Details stehen in [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md).
+Für den eigenen Code des Scanners ist noch keine Lizenz festgelegt. Das
+Repository ist privat.
 
 ## Betrieb
 
