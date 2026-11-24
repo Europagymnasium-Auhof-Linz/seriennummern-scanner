@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<!-- Responsive: passt sich an die Bildschirmbreite des Handys an; verhindert Hineinzoomen -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Seriennummer-Scanner</title>
+
+<!-- PWA: macht die App auf dem Handy installierbar ("Zum Startbildschirm hinzufügen") -->
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#16a34a" />
+<!-- iOS/Safari: App-Icon und Vollbild-Verhalten -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Seriennr." />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+
+<!--
+  Scan-Bibliothek: html5-qrcode (1D-Barcodes wie Code128/Code39 + QR).
+  Lokale Datei, lädt auch per file:// (Direktöffnen am Handy).
+  Im einzelnen Standalone-Build (seriennummer-scanner.html) ist diese
+  Bibliothek direkt eingebettet -> komplett offline, eine einzige Datei.
+-->
+<script src="./html5-qrcode.min.js"></script>
+
+<style>
+  /* ---------- Grundlayout ---------- */
+  :root {
+    --gruen: #16a34a;
+    --gruen-hell: #22c55e;
+    --rot: #dc2626;
+    --grau: #f1f5f9;
+    --grau-dunkel: #475569;
+    --rahmen: #cbd5e1;
+    --text: #0f172a;
+    /* Maximale Höhe des Kamerabilds: knapp die halbe Bildschirmhöhe, damit
+       Seriennummer und „Übernehmen" am Handy ohne Scrollen sichtbar bleiben. */
+    --kamera-hoehe: clamp(240px, 45vh, 420px);
+  }
+  /* svh = Höhe bei eingeblendeter Browserleiste (springt beim Scrollen nicht). */
+  @supports (height: 1svh) {
+    :root { --kamera-hoehe: clamp(240px, 45svh, 420px); }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #ffffff;
+    color: var(--text);
+    /* Bequem mit einer Hand bedienbar: angenehme Schriftgröße */
+    font-size: 17px;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  header {
+    background: var(--text);
+    color: #fff;
+    padding: 14px 16px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  #anzahl {
+    background: var(--gruen);
+    color: #fff;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  main { padding: 16px; max-width: 640px; margin: 0 auto; }
+
+  /* ---------- Große, gut tippbare Buttons ---------- */
+  button {
+    font-size: 18px;
+    font-weight: 600;
+    padding: 16px;
+    border: none;
+    border-radius: 14px;
+    width: 100%;
+    cursor: pointer;
+    color: #fff;
+    /* Mindesthöhe für sichere Treffer mit dem Daumen */
+    min-height: 56px;
+  }
+  button:active { transform: scale(0.98); }
+
+  .btn-primaer { background: var(--gruen); }
+  .btn-grau    { background: var(--grau-dunkel); }
+  .btn-rot     { background: var(--rot); }
+
+  .btn-reihe { display: flex; gap: 10px; margin-bottom: 12px; }
+  .btn-reihe button { flex: 1; }
+
+  /* ---------- Modus-Umschalter (Barcode / QR) ---------- */
+  .modus-reihe { display: flex; gap: 10px; margin-bottom: 12px; }
+  .modus-reihe button { flex: 1; }
+  .modus-btn {
+    background: var(--grau);
+    color: var(--grau-dunkel);
+    border: 2px solid var(--rahmen);
+  }
+  .modus-btn.aktiv {
+    background: var(--gruen);
+    color: #fff;
+    border-color: var(--gruen);
+  }
+
+  /* ---------- Kamera-Bereich (Live-Scan) ---------- */
+  #scan-bereich {
+    margin-bottom: 12px;
+    border-radius: 14px;
+    overflow: hidden;
+    background: #000;
+    position: relative; /* Basis für die eingeblendeten Overlays */
+    /* Höhe begrenzen; ein höheres Kamerabild wird oben und unten gleichmäßig
+       abgeschnitten (mittiger Ausschnitt). */
+    max-height: var(--kamera-hoehe);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  #scan-bereich:empty, #scan-bereich.aus { display: none; }
+  /* Video (nativer BarcodeDetector-Pfad) bzw. von html5-qrcode erzeugtes Video */
+  #live-video {
+    width: 100%; display: block; border-radius: 14px;
+    flex: 0 0 auto;
+    max-height: var(--kamera-hoehe);
+    object-fit: cover; /* füllt den Bereich, schneidet mittig zu */
+  }
+  #reader { width: 100%; flex: 0 0 auto; }
+  #reader video { width: 100% !important; border-radius: 14px; }
+
+  /* Über das Video gelegte Zeichenfläche für die Code-Markierung. */
+  #overlay-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; /* blockiert keine Berührungen des Videos */
+    object-fit: cover;    /* gleicher Ausschnitt wie das Video */
+  }
+
+  /* Kleine Anzeige des aktiven Scan-Modus im Kamerabild (das Modus-Menü ist
+     bei laufender Kamera ausgeblendet). */
+  #modus-chip {
+    position: absolute; top: 8px; left: 8px;
+    background: rgba(0, 0, 0, 0.6); color: #fff;
+    font-size: 13px; font-weight: 700;
+    padding: 4px 10px; border-radius: 999px;
+    pointer-events: none; z-index: 4;
+  }
+  #modus-chip:empty { display: none; }
+
+  /* Bei laufender Kamera ausblenden, damit das Kamerabild ganz oben sitzt. */
+  body.kamera-an .nur-ohne-kamera { display: none; }
+
+  /* Bestätigungs-Leiste unten im Kamerabild. */
+  #overlay-best {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    z-index: 5;
+  }
+  #overlay-best[hidden] { display: none; }
+  #overlay-code {
+    color: #fff; font-size: 22px; font-weight: 800;
+    text-align: center; word-break: break-all; line-height: 1.2;
+  }
+  #overlay-hinweis {
+    color: #fbbf24; font-weight: 700; font-size: 14px;
+    text-align: center; margin-top: 4px; min-height: 18px;
+  }
+  .overlay-buttons { display: flex; gap: 10px; margin-top: 10px; }
+  .overlay-buttons button { flex: 1; min-height: 52px; }
+
+  /* ---------- Bestätigungs-Box (erkannter Code) ---------- */
+  #bestaetigung {
+    border: 2px solid var(--gruen);
+    background: #f0fdf4;
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  #bestaetigung .label {
+    font-size: 13px; color: var(--grau-dunkel);
+    text-transform: uppercase; font-weight: 700;
+  }
+  #bestaetigung-wert {
+    font-size: 22px; font-weight: 800; word-break: break-all; margin: 6px 0 2px;
+  }
+  #bestaetigung-hinweis {
+    color: #92400e; font-weight: 700; font-size: 14px; margin-bottom: 10px;
+  }
+  #bestaetigung-hinweis:empty { margin-bottom: 4px; }
+
+  /* ---------- Manuelle Eingabe ---------- */
+  .eingabe-reihe { display: flex; gap: 10px; margin-bottom: 12px; }
+  .eingabe-reihe input {
+    flex: 1;
+    font-size: 18px;
+    padding: 16px;
+    border: 2px solid var(--rahmen);
+    border-radius: 14px;
+    min-width: 0; /* erlaubt Schrumpfen in flexbox */
+  }
+  .eingabe-reihe button { flex: 0 0 auto; width: auto; padding: 16px 22px; }
+
+  /* ---------- Status-/Hinweisanzeige ---------- */
+  #status {
+    text-align: center;
+    font-weight: 700;
+    padding: 14px;
+    border-radius: 14px;
+    margin-bottom: 16px;
+    min-height: 22px;
+    transition: background 0.15s ease;
+  }
+  .status-neu     { background: #dcfce7; color: var(--gruen); }
+  .status-dup     { background: #fef9c3; color: #92400e; }
+  .status-info    { background: var(--grau); color: var(--grau-dunkel); }
+  .status-fehler  { background: #fee2e2; color: var(--rot); }
+
+  /* ---------- Tabelle ---------- */
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td {
+    text-align: left;
+    padding: 12px 8px;
+    border-bottom: 1px solid var(--rahmen);
+    font-size: 15px;
+    word-break: break-all;
+  }
+  th { font-size: 13px; color: var(--grau-dunkel); text-transform: uppercase; }
+  td.nr { font-weight: 700; width: 44px; }
+  td.zeit { color: var(--grau-dunkel); white-space: nowrap; font-size: 13px; }
+  td.aktion { width: 44px; text-align: right; }
+
+  /* Lösch-Button pro Zeile: klein, aber noch gut tippbar */
+  .del-btn {
+    width: 40px; height: 40px; min-height: 40px;
+    padding: 0; border-radius: 10px;
+    background: var(--rot); font-size: 18px; line-height: 1;
+  }
+
+  .leer-hinweis { text-align: center; color: var(--grau-dunkel); padding: 30px 0; }
+
+  /* ---------- Grünes Aufblinken nach erfolgreichem Scan ---------- */
+  #blitz {
+    position: fixed; inset: 0;
+    background: var(--gruen-hell);
+    opacity: 0;
+    pointer-events: none; /* blockiert keine Klicks */
+    z-index: 100;
+    transition: opacity 0.08s ease;
+  }
+  #blitz.an { opacity: 0.55; }
+
+  .abschnitt-titel {
+    font-size: 14px; color: var(--grau-dunkel);
+    margin: 18px 0 6px; text-transform: uppercase; font-weight: 700;
+  }
+
+  /* ---------- Längen-Filter (Einstellungen) ---------- */
+  #laenge-filter {
+    border: 1px solid var(--rahmen);
+    border-radius: 14px;
+    padding: 6px 14px;
+    margin-bottom: 12px;
+    background: var(--grau);
+  }
+  #laenge-filter > summary {
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--grau-dunkel);
+    padding: 8px 0;
+    list-style-position: inside;
+  }
+  .filter-hinweis {
+    font-size: 13px; color: var(--grau-dunkel);
+    margin: 4px 0 10px;
+  }
+  .filter-reihe { display: flex; gap: 10px; margin-bottom: 8px; }
+  .filter-feld { flex: 1; display: flex; flex-direction: column; }
+  .filter-feld label {
+    font-size: 13px; color: var(--grau-dunkel);
+    font-weight: 700; margin-bottom: 4px;
+  }
+  .filter-feld input {
+    font-size: 18px;
+    padding: 12px;
+    border: 2px solid var(--rahmen);
+    border-radius: 12px;
+    min-width: 0;
+    background: #fff;
+  }
+  #filter-aktiv-hinweis {
+    font-size: 13px; font-weight: 700; color: var(--gruen);
+    margin-top: 4px; min-height: 18px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Vollflächiges grünes Overlay für das Blink-Feedback -->
+<div id="blitz"></div>
+
+<header>
+  <h1>Seriennummern</h1>
+  <span id="anzahl">0</span>
+</header>
+
+<main>
+  <!-- Scan-Modus: QR-Code oder Barcode (Code128). Beschränkt die Erkennung
+       auf genau ein Format und hält Fehlerkennungen niedrig. -->
+  <div class="abschnitt-titel nur-ohne-kamera">Was scannen?</div>
+  <div class="modus-reihe nur-ohne-kamera">
+    <button id="btn-modus-barcode" class="modus-btn" type="button">Barcode</button>
+    <button id="btn-modus-qr" class="modus-btn" type="button">QR-Code</button>
+    <button id="btn-modus-lenovo" class="modus-btn" type="button">Lenovo-SN</button>
+  </div>
+  <!-- Erklärung nur im Lenovo-Modus sichtbar -->
+  <p id="lenovo-hinweis" class="filter-hinweis nur-ohne-kamera" hidden>
+    Lenovo-Modus: Aus allen Barcodes des Kartonetiketts ((S)SN, SN.MO, MTM.SN, SN)
+    wird automatisch die 8-stellige Seriennummer herausgelöst. WMAC und andere
+    Codes werden ignoriert. Der Längen-Filter ist in diesem Modus aus.
+    <br /><span id="lenovo-diag"></span>
+  </p>
+
+  <!--
+    Live-Scan: kontinuierliche Erkennung wie in der Kamera-App.
+    Nutzt bevorzugt den nativen BarcodeDetector des Browsers, sonst die
+    mitgelieferte Bibliothek. Funktioniert nur über HTTPS oder localhost.
+  -->
+  <div id="scan-bereich" class="aus">
+    <video id="live-video" playsinline muted></video> <!-- nativer Pfad -->
+    <div id="reader"></div>                            <!-- Fallback-Pfad -->
+    <!-- Live-Markierung des erkannten Codes (nur nativer Pfad zeichnet hier). -->
+    <canvas id="overlay-canvas"></canvas>
+    <!-- Aktiver Scan-Modus (Menü ist bei laufender Kamera ausgeblendet). -->
+    <div id="modus-chip"></div>
+    <!-- Bestätigungs-Leiste direkt im Kamerabild. -->
+    <div id="overlay-best" hidden>
+      <div id="overlay-code"></div>
+      <div id="overlay-hinweis"></div>
+      <div class="overlay-buttons">
+        <button id="overlay-ok" class="btn-primaer" type="button">Übernehmen</button>
+        <button id="overlay-verwerfen" class="btn-grau" type="button">Verwerfen</button>
+      </div>
+    </div>
+  </div>
+  <div class="btn-reihe">
+    <button id="btn-scan-start" class="btn-primaer">Live-Kamera starten</button>
+    <button id="btn-scan-stop" class="btn-grau" style="display:none">Kamera stoppen</button>
+  </div>
+
+  <!--
+    Längen-Filter: legt fest, wie viele Zeichen der aus einem Barcode/QR-Code
+    ausgelesene Text haben muss, damit er als Kandidat vorgeschlagen wird.
+    Feld leer (oder 0) => keine Begrenzung (Verhalten wie vorher).
+  -->
+  <details id="laenge-filter">
+    <summary>Längen-Filter für Scans</summary>
+    <p class="filter-hinweis">
+      Nur Barcodes/QR-Codes mit genau dieser Zeichenlänge werden erkannt und als
+      Kandidat vorgeschlagen. Feld leer lassen = keine Begrenzung.
+    </p>
+    <div class="filter-reihe">
+      <div class="filter-feld">
+        <label for="genaue-laenge">Genaue Länge</label>
+        <input id="genaue-laenge" type="number" inputmode="numeric" min="0" step="1"
+               placeholder="z. B. 10" autocomplete="off" />
+      </div>
+    </div>
+    <div id="filter-aktiv-hinweis"></div>
+  </details>
+
+  <!--
+    Bestätigungs-Box: zeigt den zuletzt erkannten Code an. Erst mit
+    "OK – übernehmen" wird er in die Liste aufgenommen; "Verwerfen" bricht ab.
+  -->
+  <div id="bestaetigung" hidden>
+    <div class="label">Erkannt – übernehmen?</div>
+    <div id="bestaetigung-wert"></div>
+    <div id="bestaetigung-hinweis"></div>
+    <div class="btn-reihe">
+      <button id="btn-uebernehmen" class="btn-primaer">OK – übernehmen</button>
+      <button id="btn-verwerfen" class="btn-grau">Verwerfen</button>
+    </div>
+  </div>
+
+  <!-- Manueller Fallback: Seriennummer eintippen -->
+  <div class="abschnitt-titel">Manuell eingeben</div>
+  <div class="eingabe-reihe">
+    <input id="manuell-input" type="text" inputmode="text"
+           placeholder="Seriennummer eintippen…" autocomplete="off" />
+    <button id="btn-manuell" class="btn-primaer">+</button>
+  </div>
+
+  <!-- Statuszeile: zeigt "Neu Nr. X" oder "schon erfasst als Nr. X" -->
+  <div id="status" class="status-info">Bereit. „Live-Kamera starten" oder manuell eingeben.</div>
+
+  <!-- Export / Alles löschen -->
+  <div class="btn-reihe">
+    <button id="btn-export" class="btn-grau">Als CSV exportieren</button>
+    <button id="btn-alle-loeschen" class="btn-rot">Alles löschen</button>
+  </div>
+
+  <!-- Liste aller Einträge -->
+  <div class="abschnitt-titel">Erfasste Einträge</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Nr.</th>
+        <th>Seriennummer</th>
+        <th>Zeit</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="liste"></tbody>
+  </table>
+  <div id="leer-hinweis" class="leer-hinweis">Noch keine Einträge.</div>
+</main>
+
+<script>
+/* =====================================================================
+   Seriennummer-Scanner – gesamte App-Logik
+   ---------------------------------------------------------------------
+   Datenmodell:
+     eintraege : Array von Objekten { nr, seriennummer, zeit }
+       - nr           : fortlaufende Ganzzahl (1, 2, 3, …)
+       - seriennummer : der gescannte/eingetippte Text
+       - zeit         : Zeitstempel (ISO-String, beim Erfassen gesetzt)
+     naechsteNr : Zähler für die nächste zu vergebende Nummer
+   Beides wird in localStorage gespeichert, damit nichts verloren geht.
+   ===================================================================== */
+
+const STORAGE_KEY = "seriennummern_v1";
+
+// ---------- Zustand laden / speichern ----------
+let eintraege = [];      // alle erfassten Einträge
+let naechsteNr = 1;      // nächste fortlaufende Nummer
+
+function ladeZustand() {
+  try {
+    const roh = localStorage.getItem(STORAGE_KEY);
+    if (roh) {
+      const daten = JSON.parse(roh);
+      eintraege = Array.isArray(daten.eintraege) ? daten.eintraege : [];
+      naechsteNr = typeof daten.naechsteNr === "number" ? daten.naechsteNr : 1;
+    }
+  } catch (e) {
+    // Falls die gespeicherten Daten beschädigt sind: sauber neu beginnen
+    console.error("Konnte gespeicherte Daten nicht lesen:", e);
+    eintraege = [];
+    naechsteNr = 1;
+  }
+}
+
+function speichereZustand() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ eintraege, naechsteNr }));
+}
+
+// ---------- Längen-Filter für gescannte Codes ----------
+// Legt fest, wie viele Zeichen der aus einem Barcode/QR ausgelesene Text haben
+// muss, um als Kandidat vorgeschlagen zu werden. 0 = keine Begrenzung.
+// Wird separat gespeichert, damit das bestehende Datenmodell unberührt bleibt.
+const FILTER_KEY = "seriennummern_filter_v1";
+let filterLaenge = 0;   // 0 = keine Begrenzung; sonst exakt geforderte Zeichenzahl
+
+function ladeFilter() {
+  try {
+    const roh = localStorage.getItem(FILTER_KEY);
+    if (roh) {
+      const daten = JSON.parse(roh);
+      // Neuer Wert "laenge"; als Rückfall auch alten "min" akzeptieren.
+      const wert = Number.isFinite(daten.laenge) ? daten.laenge
+                 : (Number.isFinite(daten.min) ? daten.min : 0);
+      filterLaenge = wert > 0 ? Math.floor(wert) : 0;
+    }
+  } catch (e) {
+    filterLaenge = 0;
+  }
+}
+
+function speichereFilter() {
+  localStorage.setItem(FILTER_KEY, JSON.stringify({ laenge: filterLaenge }));
+}
+
+// Prüft, ob die Zeichenlänge des ausgelesenen Textes exakt passt.
+function laengeErlaubt(text) {
+  if (scanModus === "lenovo") return true;          // Lenovo-Modus: SN ist immer 8-stellig
+  if (filterLaenge <= 0) return true;               // keine Begrenzung
+  return (text || "").trim().length === filterLaenge;
+}
+
+// Kurzer Text, der die aktuell geforderte Länge beschreibt.
+function beschreibeErlaubteLaenge() {
+  if (filterLaenge > 0) return "erlaubt: genau " + filterLaenge + " Zeichen";
+  return "";
+}
+
+// ---------- Scan-Modus (Barcode / QR) ----------
+// Bestimmt, welches einzelne Code-Format erkannt wird. Getrennt gespeichert.
+const MODUS_KEY = "seriennummern_modus_v1";
+let scanModus = "barcode";   // "barcode" (Code128), "qr" oder "lenovo"
+
+function ladeModus() {
+  try {
+    const m = localStorage.getItem(MODUS_KEY);
+    if (m === "qr" || m === "barcode" || m === "lenovo") scanModus = m;
+  } catch (e) { scanModus = "barcode"; }
+}
+
+function speichereModus() {
+  localStorage.setItem(MODUS_KEY, scanModus);
+}
+
+// Beschriftung für Statusmeldungen ("Barcode" / "QR-Code" / "Lenovo-Etikett").
+function modusLabel() {
+  if (scanModus === "qr") return "QR-Code";
+  if (scanModus === "lenovo") return "Lenovo-Etikett";
+  return "Barcode";
+}
+
+// ---------- Lenovo-Modus: Seriennummer aus Etiketten-Barcodes herauslösen ----------
+// Lenovo-Kartonetiketten tragen mehrere Code128-Barcodes, die alle die
+// 8-stellige Seriennummer enthalten – aber mit unterschiedlichen Zusätzen
+// (Datenkennungen nach ANSI MH10.8.2). Beispiele vom Etikett:
+//   (S)SN      -> "SYM10C343"              Kennung "S" + SN
+//   SN.MO      -> "YM10C343YM90B48170KH"   SN + 12-stellige MO-Nummer
+//   (1S)MTM.SN -> "1S82XKS00500YM10C343"   Kennung "1S" + 10-stelliger MTM + SN
+//   SN         -> "YM10C343"               nur die SN
+//   WMAC       -> "B047E9D82C1E"           MAC-Adresse, KEINE SN -> ignorieren
+// Gibt die 8-stellige SN zurück oder null, wenn kein Lenovo-Muster passt.
+const LENOVO_SN_MUSTER = /^[A-Z0-9]{8}$/;
+
+function extrahiereLenovoSN(roh) {
+  let s = (roh || "").trim().toUpperCase();
+  // Code39-Leser liefern manchmal die Start/Stopp-Sterne mit.
+  s = s.replace(/^\*+|\*+$/g, "");
+  if (!s) return null;
+
+  // 1) Reine SN: genau 8 alphanumerische Zeichen.
+  if (LENOVO_SN_MUSTER.test(s)) return s;
+
+  // 2) (1S)MTM.SN: Kennung "1S", danach MTM (10 Zeichen) + SN (8 Zeichen).
+  //    Robust: die letzten 8 Zeichen nehmen, falls insgesamt lang genug.
+  if (s.startsWith("1S") && s.length >= 10) {
+    const sn = s.slice(-8);
+    if (LENOVO_SN_MUSTER.test(sn)) return sn;
+  }
+
+  // 3) (S)SN: Kennung "S" + 8-stellige SN = 9 Zeichen.
+  if (s.length === 9 && s.startsWith("S")) {
+    const sn = s.slice(1);
+    if (LENOVO_SN_MUSTER.test(sn)) return sn;
+  }
+
+  // 4) SN.MO: SN (8) direkt gefolgt von MO-Nummer (12) = 20 Zeichen, ohne Kennung.
+  if (s.length === 20 && /^[A-Z0-9]{20}$/.test(s)) {
+    const sn = s.slice(0, 8);
+    if (LENOVO_SN_MUSTER.test(sn)) return sn;
+  }
+
+  // WMAC (12 Hex, evtl. mit Kennung "M") und alles andere: keine SN.
+  return null;
+}
+
+// ---------- Hilfsfunktionen ----------
+
+// Sucht einen bereits erfassten Eintrag mit gleicher Seriennummer.
+// Gibt das Eintrags-Objekt zurück oder undefined.
+function findeEintrag(seriennummer) {
+  return eintraege.find(e => e.seriennummer === seriennummer);
+}
+
+// Formatiert einen ISO-Zeitstempel hübsch für die Anzeige (lokale Zeit).
+function formatiereZeit(isoString) {
+  const d = new Date(isoString);
+  return d.toLocaleString("de-DE", {
+    day: "2-digit", month: "2-digit", year: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  });
+}
+
+// ---------- Statusanzeige ----------
+const statusEl = document.getElementById("status");
+function zeigeStatus(text, typ) {
+  statusEl.textContent = text;
+  statusEl.className = "status-" + typ; // typ: neu | dup | info | fehler
+}
+
+// ---------- Visuelles + akustisches Feedback ----------
+const blitzEl = document.getElementById("blitz");
+
+// Grünes Aufblinken über den ganzen Bildschirm.
+function blinkeGruen() {
+  blitzEl.classList.add("an");
+  setTimeout(() => blitzEl.classList.remove("an"), 150);
+}
+
+// Kurzer Piepton über die Web Audio API (kein externes Soundfile nötig).
+let audioCtx = null;
+function piepe(frequenz = 880, dauerMs = 120) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = frequenz;
+    gain.gain.value = 0.15;
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dauerMs / 1000);
+  } catch (e) {
+    // Ton ist optional – Fehler hier ignorieren wir bewusst.
+  }
+}
+
+// Kurze Vibration (sofern vom Gerät unterstützt).
+function vibriere(muster) {
+  if (navigator.vibrate) navigator.vibrate(muster);
+}
+
+// Erfolgs-Feedback (neuer Eintrag): grün blinken + hoher Piep + kurze Vibration.
+function feedbackErfolg() {
+  blinkeGruen();
+  piepe(880, 120);
+  vibriere(60);
+}
+
+// Duplikat-Feedback: tieferer Doppel-Piep + längere Vibration, KEIN grünes Blinken.
+function feedbackDuplikat() {
+  piepe(300, 90);
+  setTimeout(() => piepe(300, 90), 130);
+  vibriere([40, 60, 40]);
+}
+
+// ---------- Kernlogik: Seriennummer erfassen ----------
+// Wird sowohl vom Scanner als auch von der manuellen Eingabe aufgerufen.
+function erfasseSeriennummer(roh) {
+  const seriennummer = (roh || "").trim();
+  if (!seriennummer) {
+    zeigeStatus("Leere Eingabe ignoriert.", "fehler");
+    return;
+  }
+
+  // Duplikat-Prüfung: bekommt KEINE neue Nummer.
+  const vorhanden = findeEintrag(seriennummer);
+  if (vorhanden) {
+    zeigeStatus("Schon erfasst als Nr. " + vorhanden.nr + " — " + seriennummer, "dup");
+    feedbackDuplikat();
+    return;
+  }
+
+  // Neuer Eintrag: nächste fortlaufende Nummer vergeben.
+  const eintrag = {
+    nr: naechsteNr,
+    seriennummer: seriennummer,
+    zeit: new Date().toISOString()
+  };
+  eintraege.push(eintrag);
+  naechsteNr++;          // Zähler nur bei neuem Eintrag erhöhen
+  speichereZustand();
+  rendereListe();
+
+  zeigeStatus("Neu erfasst als Nr. " + eintrag.nr + " — " + seriennummer, "neu");
+  feedbackErfolg();
+}
+
+// ---------- Liste / Tabelle rendern ----------
+const listeEl = document.getElementById("liste");
+const anzahlEl = document.getElementById("anzahl");
+const leerHinweisEl = document.getElementById("leer-hinweis");
+
+function rendereListe() {
+  listeEl.innerHTML = "";
+
+  // Neueste oben: Kopie absteigend nach Nummer sortieren.
+  const sortiert = [...eintraege].sort((a, b) => b.nr - a.nr);
+
+  for (const e of sortiert) {
+    const tr = document.createElement("tr");
+
+    const tdNr = document.createElement("td");
+    tdNr.className = "nr";
+    tdNr.textContent = e.nr;
+
+    const tdSn = document.createElement("td");
+    tdSn.textContent = e.seriennummer; // textContent => sicher gegen HTML-Injection
+
+    const tdZeit = document.createElement("td");
+    tdZeit.className = "zeit";
+    tdZeit.textContent = formatiereZeit(e.zeit);
+
+    const tdAktion = document.createElement("td");
+    tdAktion.className = "aktion";
+    const delBtn = document.createElement("button");
+    delBtn.className = "del-btn";
+    delBtn.textContent = "✕";
+    delBtn.title = "Eintrag löschen";
+    delBtn.addEventListener("click", () => loescheEintrag(e.nr));
+    tdAktion.appendChild(delBtn);
+
+    tr.append(tdNr, tdSn, tdZeit, tdAktion);
+    listeEl.appendChild(tr);
+  }
+
+  anzahlEl.textContent = eintraege.length;
+  leerHinweisEl.style.display = eintraege.length === 0 ? "block" : "none";
+}
+
+// ---------- Einträge löschen ----------
+// Einzelnen Eintrag entfernen. Danach werden alle Einträge lückenlos neu
+// durchnummeriert (z. B. 1,3 -> 1,2), damit die Nummern fortlaufend bleiben.
+function loescheEintrag(nr) {
+  const eintrag = eintraege.find(e => e.nr === nr);
+  if (!eintrag) return;
+  if (!confirm('Eintrag Nr. ' + nr + ' (' + eintrag.seriennummer + ') wirklich löschen?')) return;
+
+  eintraege = eintraege.filter(e => e.nr !== nr);
+  nummeriereNeu();
+  speichereZustand();
+  rendereListe();
+  zeigeStatus("Eintrag Nr. " + nr + " gelöscht.", "info");
+}
+
+// Vergibt fortlaufende Nummern (1,2,3,…) in der bestehenden Reihenfolge
+// und setzt den Zähler entsprechend. Wird nach dem Löschen aufgerufen.
+function nummeriereNeu() {
+  eintraege.forEach((e, i) => { e.nr = i + 1; });
+  naechsteNr = eintraege.length + 1;
+}
+
+// Alles löschen – mit Sicherheitsabfrage. Setzt auch den Zähler zurück.
+function loescheAlles() {
+  if (eintraege.length === 0) {
+    zeigeStatus("Es gibt nichts zu löschen.", "info");
+    return;
+  }
+  if (!confirm("Wirklich ALLE " + eintraege.length + " Einträge unwiderruflich löschen?")) return;
+
+  eintraege = [];
+  naechsteNr = 1;
+  speichereZustand();
+  rendereListe();
+  zeigeStatus("Alle Einträge gelöscht.", "info");
+}
+
+// ---------- CSV-Export ----------
+// Trennzeichen Semikolon, UTF-8 mit BOM (damit Excel Umlaute korrekt zeigt).
+function exportiereCSV() {
+  if (eintraege.length === 0) {
+    zeigeStatus("Keine Daten zum Exportieren.", "info");
+    return;
+  }
+
+  // Feld für CSV maskieren: Anführungszeichen verdoppeln und in "" einfassen,
+  // falls Sonderzeichen (; " Zeilenumbruch) enthalten sind.
+  function csvFeld(wert) {
+    const s = String(wert);
+    if (/[";\n\r]/.test(s)) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  // Nach Nummer aufsteigend exportieren.
+  const sortiert = [...eintraege].sort((a, b) => a.nr - b.nr);
+
+  const zeilen = [];
+  zeilen.push(["Nr", "Seriennummer", "Zeitstempel"].join(";")); // Kopfzeile
+  for (const e of sortiert) {
+    zeilen.push([
+      csvFeld(e.nr),
+      csvFeld(e.seriennummer),
+      csvFeld(formatiereZeit(e.zeit))
+    ].join(";"));
+  }
+
+  // \r\n als Zeilenumbruch (Excel-freundlich) und BOM voranstellen.
+  const inhalt = "﻿" + zeilen.join("\r\n");
+  const blob = new Blob([inhalt], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  // Dateiname mit Datum.
+  const jetzt = new Date();
+  const datum = jetzt.toISOString().slice(0, 10); // YYYY-MM-DD
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "seriennummern_" + datum + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  zeigeStatus(eintraege.length + " Einträge als CSV exportiert.", "info");
+}
+
+// Kleine Diagnosezeile (welcher Erkennungspfad, welche Formate) – hilft beim
+// Eingrenzen, wenn ein Etikett nicht gelesen wird.
+const lenovoDiagEl = document.getElementById("lenovo-diag");
+function zeigeDiagnose(text) {
+  if (lenovoDiagEl) lenovoDiagEl.textContent = "Erkennung: " + text;
+}
+
+// ---------- Code-Formate je Scan-Modus ----------
+// Lenovo-Etiketten nutzen Code128; Code39 wird sicherheitshalber mit
+// freigeschaltet (manche Etikettenvarianten). QR bleibt dort aus, damit die
+// kleinen QR-Codes auf dem Etikett nicht dazwischenfunken.
+function nativeFormateFuerModus() {
+  if (scanModus === "qr") return ["qr_code"];
+  if (scanModus === "lenovo") return ["code_128", "code_39", "code_93", "itf", "codabar"];
+  return ["code_128"];
+}
+function html5FormateFuerModus() {
+  const F = Html5QrcodeSupportedFormats;
+  if (scanModus === "qr") return [F.QR_CODE];
+  if (scanModus === "lenovo") return [F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.CODABAR];
+  return [F.CODE_128];
+}
+
+// ---------- Live-Scan (kontinuierlich, wie die Kamera-App) ----------
+// Bevorzugt den NATIVEN BarcodeDetector des Browsers (schnell, hardware-nah,
+// dieselbe Erkennung wie die Kamera-App). Fällt auf die mitgelieferte
+// Bibliothek zurück (z. B. iOS/Safari ohne BarcodeDetector).
+// Voraussetzung: sicherer Kontext (HTTPS oder localhost).
+const scanBereich = document.getElementById("scan-bereich");
+const videoEl = document.getElementById("live-video");
+const btnStart = document.getElementById("btn-scan-start");
+const btnStop = document.getElementById("btn-scan-stop");
+
+let scanLaeuft = false;
+let kameraStream = null;   // MediaStream beim nativen Pfad
+let detektor = null;       // BarcodeDetector-Instanz
+let rafId = null;          // Schleifen-Handle für die native Erkennung
+let html5Scanner = null;   // Fallback-Instanz (html5-qrcode)
+
+// Entprellung: gleichen Code nicht im Dauerfeuer mehrfach erkennen.
+let letzterCode = null;
+let letzterCodeZeit = 0;
+
+// Mehrfach-Bestätigung gegen Fehlerkennungen (z. B. Bodenmuster):
+// Derselbe Wert muss mehrere Bilder hintereinander gelesen werden, bevor er
+// als Kandidat gilt. Zufallstreffer ändern sich von Bild zu Bild und fallen
+// so durch. GELESEN_NOETIG = wie oft in Folge derselbe Wert kommen muss.
+const GELESEN_NOETIG = 2;
+let kandidatWert = null;
+let kandidatAnzahl = 0;
+let kandidatZeit = 0;
+
+// Wird bei jeder Live-Erkennung aufgerufen -> zeigt den Code zur Bestätigung.
+function verarbeiteLive(text, format) {
+  if (wartetBestaetigung) return;          // es liegt schon ein Code zur Bestätigung vor
+  let roh = (text || "").trim();
+  if (!roh) return;
+  const jetzt = Date.now();
+
+  // Lenovo-Modus: SN VOR der Mehrfach-Bestätigung herauslösen. So zählen
+  // Lesungen verschiedener Etiketten-Barcodes ((S)SN, SN, MTM.SN …) für
+  // dieselbe SN zusammen. Codes ohne SN-Muster werden ebenfalls erst nach
+  // GELESEN_NOETIG Lesungen gemeldet, damit die Statuszeile nicht flackert.
+  let lenovoAbgelehnt = false;
+  if (scanModus === "lenovo") {
+    const sn = extrahiereLenovoSN(roh);
+    if (sn) roh = sn; else lenovoAbgelehnt = true;
+  }
+
+  // Zähler zurücksetzen, wenn ein anderer Wert kommt oder die letzte gleiche
+  // Lesung zu lange her ist (kein durchgehendes Halten mehr).
+  if (roh !== kandidatWert || (jetzt - kandidatZeit) > 1200) {
+    kandidatWert = roh;
+    kandidatAnzahl = 0;
+  }
+  kandidatAnzahl++;
+  kandidatZeit = jetzt;
+
+  // Noch nicht oft genug in Folge gelesen -> weiter sammeln, nichts anzeigen.
+  if (kandidatAnzahl < GELESEN_NOETIG) return;
+
+  // Entprellung: denselben eben schon gezeigten Code nicht sofort erneut melden.
+  if (roh === letzterCode && (jetzt - letzterCodeZeit) < 1500) return;
+  letzterCode = roh;
+  letzterCodeZeit = jetzt;
+  kandidatWert = null;
+  kandidatAnzahl = 0;
+
+  // Lenovo-Modus: Code enthält keine Seriennummer (z. B. WMAC) -> ignorieren.
+  if (lenovoAbgelehnt) {
+    zeigeStatus("Ignoriert – keine Lenovo-Seriennummer" + (format ? " (" + format + ")" : "") + ": " + roh, "info");
+    return;
+  }
+
+  // Längen-Filter: unpassende Codes gar nicht erst als Kandidat vorschlagen.
+  if (!laengeErlaubt(roh)) {
+    zeigeStatus("Ignoriert (" + roh.length + " Zeichen) – " + beschreibeErlaubteLaenge() + ".", "info");
+    return;
+  }
+
+  zeigeBestaetigung(roh);
+}
+
+// ---------- Bestätigung eines erkannten Codes ----------
+const bestEl = document.getElementById("bestaetigung");
+const bestWertEl = document.getElementById("bestaetigung-wert");
+const bestHinweisEl = document.getElementById("bestaetigung-hinweis");
+// Elemente der im Kamerabild eingeblendeten Bestätigungs-Leiste.
+const overlayBestEl = document.getElementById("overlay-best");
+const overlayCodeEl = document.getElementById("overlay-code");
+const overlayHinweisEl = document.getElementById("overlay-hinweis");
+let wartetBestaetigung = false;  // true, solange eine Bestätigung offen ist
+let pendingCode = null;          // der noch nicht übernommene Code
+
+// Zeigt den erkannten Code zur Bestätigung.
+// Bei laufender Kamera direkt IM Kamerabild (Overlay), sonst in der Box darunter.
+function zeigeBestaetigung(text) {
+  const code = (text || "").trim();
+  if (!code) return;
+  pendingCode = code;
+  wartetBestaetigung = true;
+
+  // Hinweis, falls dieser Code bereits erfasst wurde.
+  const vorhanden = findeEintrag(code);
+  const hinweis = vorhanden ? "Schon erfasst als Nr. " + vorhanden.nr : "";
+
+  if (scanLaeuft) {
+    // Einblendung im Kamerabild.
+    overlayCodeEl.textContent = code;
+    overlayHinweisEl.textContent = hinweis;
+    overlayBestEl.hidden = false;
+    bestEl.hidden = true; // untere Box in diesem Fall ausblenden
+  } else {
+    // Fallback: Box unterhalb der Kamera.
+    bestWertEl.textContent = code;
+    bestHinweisEl.textContent = hinweis;
+    bestEl.hidden = false;
+  }
+
+  vibriere(40);  // kurzes neutrales Feedback: "Code erkannt"
+  zeigeStatus("Erkannt – bitte bestätigen.", "info");
+}
+
+// "OK – übernehmen": Code tatsächlich in die Liste aufnehmen.
+function uebernehmen() {
+  if (!wartetBestaetigung || pendingCode === null) return;
+  const code = pendingCode;
+  schliesseBestaetigung();
+  erfasseSeriennummer(code);  // hier kommen Duplikat-Prüfung, grünes Blinken, Piep, Speichern
+}
+
+// "Verwerfen": Box schließen, Code NICHT übernehmen.
+function verwerfen() {
+  if (!wartetBestaetigung) return;
+  schliesseBestaetigung();
+  // Zeitstempel auffrischen, damit derselbe Code nicht sofort wieder aufpoppt.
+  letzterCodeZeit = Date.now();
+  zeigeStatus("Verworfen.", "info");
+}
+
+function schliesseBestaetigung() {
+  wartetBestaetigung = false;
+  pendingCode = null;
+  bestEl.hidden = true;
+  bestHinweisEl.textContent = "";
+  overlayBestEl.hidden = true;
+  overlayHinweisEl.textContent = "";
+}
+
+document.getElementById("btn-uebernehmen").addEventListener("click", uebernehmen);
+document.getElementById("btn-verwerfen").addEventListener("click", verwerfen);
+// Buttons der eingeblendeten Leiste nutzen dieselbe Logik.
+document.getElementById("overlay-ok").addEventListener("click", uebernehmen);
+document.getElementById("overlay-verwerfen").addEventListener("click", verwerfen);
+
+const modusChipEl = document.getElementById("modus-chip");
+
+function zeigeUiAktiv() {
+  btnStart.style.display = "none";
+  btnStop.style.display = "block";
+  // Modus-Menü ausblenden und nach oben rollen: Kamerabild, erkannte
+  // Seriennummer und „Übernehmen" passen so auf einen Handy-Bildschirm.
+  document.body.classList.add("kamera-an");
+  modusChipEl.textContent = modusLabel();
+  window.scrollTo(0, 0);
+}
+
+async function starteScan() {
+  if (scanLaeuft) return;
+  scanBereich.classList.remove("aus");
+
+  // --- Pfad 1: nativer BarcodeDetector + eigener Kamera-Stream ---
+  if ("BarcodeDetector" in window) {
+    try {
+      let formate;
+      try { formate = await window.BarcodeDetector.getSupportedFormats(); } catch (e) { formate = undefined; }
+      // Nur das im gewählten Modus gewünschte Format erkennen. Das reduziert
+      // Fehlerkennungen durch linienartige Muster (Fugen, Maserung) enorm.
+      let genutzteFormate = nativeFormateFuerModus();
+      if (Array.isArray(formate)) {
+        const gefiltert = genutzteFormate.filter((f) => formate.includes(f));
+        if (gefiltert.length) genutzteFormate = gefiltert; // sonst notfalls trotzdem versuchen
+      }
+      detektor = new window.BarcodeDetector({ formats: genutzteFormate });
+      kameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+      });
+      zeigeDiagnose("nativ · Formate: " + genutzteFormate.join(", "));
+      videoEl.style.display = "block";
+      videoEl.srcObject = kameraStream;
+      await videoEl.play();
+      scanLaeuft = true;
+      zeigeUiAktiv();
+      zeigeStatus("Kamera aktiv (nativ) – " + modusLabel() + " ins Bild halten.", "info");
+      detektorSchleife();
+      return;
+    } catch (err) {
+      console.error("Nativer Live-Scan fehlgeschlagen:", err);
+      stoppeStream();   // aufräumen und unten auf die Bibliothek zurückfallen
+      detektor = null;
+    }
+  }
+
+  // --- Pfad 2: Fallback über html5-qrcode (rendert eigenes Video in #reader) ---
+  if (typeof Html5Qrcode === "undefined") {
+    zeigeStatus("Kamera nicht verfügbar (HTTPS/localhost nötig?). Foto-Scan oder manuell nutzen.", "fehler");
+    scanBereich.classList.add("aus");
+    return;
+  }
+  try {
+    videoEl.style.display = "none";
+    // Nur das gewählte Format zulassen (falls die Bibliothek die Formatliste kennt).
+    let html5Konfig = { verbose: false };
+    if (typeof Html5QrcodeSupportedFormats !== "undefined") {
+      html5Konfig.formatsToSupport = html5FormateFuerModus();
+    }
+    html5Scanner = new Html5Qrcode("reader", html5Konfig);
+    // QR: quadratisches Suchfenster; Barcode: breites Fenster.
+    // Lenovo: fast die ganze Breite nutzen, die langen Code128 (bis 20 Zeichen)
+    // passen sonst nicht ins Fenster.
+    const qrbox = scanModus === "qr"
+      ? { width: 240, height: 240 }
+      : scanModus === "lenovo"
+        ? (vw, vh) => {
+            // Höhe am sichtbaren (in der Höhe begrenzten) Kamerabereich ausrichten.
+            const sichtbar = parseFloat(getComputedStyle(scanBereich).maxHeight) || vh;
+            return { width: Math.round(vw * 0.92), height: Math.round(Math.min(vh, sichtbar) * 0.45) };
+          }
+        : { width: 250, height: 150 };
+    zeigeDiagnose("Bibliothek · Formate: " + (html5Konfig.formatsToSupport || []).length + " 1D/2D");
+    // Die Bibliothek akzeptiert als erstes Argument nur GENAU einen Schlüssel
+    // (sonst bricht start() mit einem Fehler ab). Die gewünschte Auflösung
+    // wird deshalb über videoConstraints übergeben.
+    await html5Scanner.start(
+      { facingMode: "environment" },
+      {
+        fps: 10, qrbox: qrbox,
+        videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+      },
+      (text, ergebnis) => verarbeiteLive(text, ergebnis && ergebnis.result && ergebnis.result.format
+                                          ? ergebnis.result.format.formatName : undefined),
+      () => { /* Frames ohne Treffer bewusst ignorieren */ }
+    );
+    scanLaeuft = true;
+    zeigeUiAktiv();
+    zeigeStatus("Kamera aktiv – " + modusLabel() + " ins Bild halten.", "info");
+  } catch (err) {
+    console.error("Live-Scan (Fallback) fehlgeschlagen:", err);
+    zeigeStatus("Kamera konnte nicht gestartet werden (Berechtigung? HTTPS?). Foto-Scan oder manuell nutzen.", "fehler");
+    scanBereich.classList.add("aus");
+    html5Scanner = null;
+  }
+}
+
+// Sichtbarer Ausschnitt des Kamerabilds in Video-Pixeln. Das Video ist in der
+// Höhe begrenzt und wird mittig zugeschnitten (object-fit: cover).
+function sichtbarerAusschnitt() {
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  const bw = videoEl.clientWidth, bh = videoEl.clientHeight;
+  if (!vw || !vh || !bw || !bh) return { x: 0, y: 0, w: vw, h: vh };
+  const massstab = Math.max(bw / vw, bh / vh);
+  const w = Math.min(vw, bw / massstab), h = Math.min(vh, bh / massstab);
+  return { x: (vw - w) / 2, y: (vh - h) / 2, w: w, h: h };
+}
+
+// Liegt der Mittelpunkt des erkannten Codes im sichtbaren Ausschnitt?
+function imSichtbarenAusschnitt(code, a) {
+  const b = code.boundingBox;
+  if (!b) return true;
+  const mx = b.x + b.width / 2, my = b.y + b.height / 2;
+  return mx >= a.x && mx <= a.x + a.w && my >= a.y && my <= a.y + a.h;
+}
+
+// Wiederholte native Erkennung – einmal pro Kamerabild.
+async function detektorSchleife() {
+  if (!scanLaeuft || !detektor) return;
+  try {
+    // Nur Codes berücksichtigen, die im sichtbaren Bildausschnitt liegen –
+    // sonst würde ein Code außerhalb des Bildes zur Bestätigung erscheinen.
+    const ausschnitt = sichtbarerAusschnitt();
+    const treffer = ((await detektor.detect(videoEl)) || [])
+      .filter((t) => imSichtbarenAusschnitt(t, ausschnitt));
+    if (treffer.length) {
+      // Sind mehrere Codes im Bild (ganzes Etikett), den nehmen, der eine SN
+      // enthält – sonst würde z. B. die WMAC dauerhaft alle anderen verdecken.
+      let wahl = treffer[0];
+      let anzeige = wahl.rawValue;
+      if (scanModus === "lenovo") {
+        const mitSN = treffer.find((t) => extrahiereLenovoSN(t.rawValue));
+        if (mitSN) wahl = mitSN;
+        const sn = extrahiereLenovoSN(wahl.rawValue);
+        anzeige = sn ? sn : "keine SN: " + wahl.rawValue;
+      }
+      zeichneMarkierung({ cornerPoints: wahl.cornerPoints, boundingBox: wahl.boundingBox, rawValue: anzeige });
+      verarbeiteLive(wahl.rawValue, wahl.format);
+    } else {
+      leereOverlayCanvas();                     // nichts erkannt -> Rahmen entfernen
+    }
+  } catch (e) { /* einzelne Frames ohne Treffer ignorieren */ }
+  rafId = requestAnimationFrame(detektorSchleife);
+}
+
+// ---------- Overlay-Zeichnung (Live-Markierung im Kamerabild) ----------
+const overlayCanvas = document.getElementById("overlay-canvas");
+const overlayCtx = overlayCanvas ? overlayCanvas.getContext("2d") : null;
+
+// Leert die Zeichenfläche über dem Video.
+function leereOverlayCanvas() {
+  if (!overlayCtx) return;
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+
+// Zeichnet einen Rahmen um den erkannten Code und blendet den Text darüber ein.
+// Nutzt cornerPoints (falls vorhanden), sonst die boundingBox – beide sind in
+// den Pixelmaßen des Videos; die Zeichenfläche hat dieselben Maße, deshalb
+// passt die Skalierung 1:1 (CSS skaliert und beschneidet Canvas wie das Video).
+function zeichneMarkierung(code) {
+  if (!overlayCtx) return;
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  if (!vw || !vh) return;
+  if (overlayCanvas.width !== vw || overlayCanvas.height !== vh) {
+    overlayCanvas.width = vw;
+    overlayCanvas.height = vh;
+  }
+  overlayCtx.clearRect(0, 0, vw, vh);
+
+  const punkte = code.cornerPoints && code.cornerPoints.length
+    ? code.cornerPoints
+    : (code.boundingBox
+        ? [
+            { x: code.boundingBox.x, y: code.boundingBox.y },
+            { x: code.boundingBox.x + code.boundingBox.width, y: code.boundingBox.y },
+            { x: code.boundingBox.x + code.boundingBox.width, y: code.boundingBox.y + code.boundingBox.height },
+            { x: code.boundingBox.x, y: code.boundingBox.y + code.boundingBox.height }
+          ]
+        : null);
+  if (!punkte) return;
+
+  // Rahmen zeichnen.
+  const sicht = sichtbarerAusschnitt();
+  const linienbreite = Math.max(3, Math.round(sicht.w / 180));
+  overlayCtx.lineWidth = linienbreite;
+  overlayCtx.strokeStyle = "#22c55e";
+  overlayCtx.beginPath();
+  overlayCtx.moveTo(punkte[0].x, punkte[0].y);
+  for (let i = 1; i < punkte.length; i++) overlayCtx.lineTo(punkte[i].x, punkte[i].y);
+  overlayCtx.closePath();
+  overlayCtx.stroke();
+
+  // Text über dem Code einblenden.
+  const text = (code.rawValue || "").trim();
+  if (text) {
+    const minX = Math.min(...punkte.map((p) => p.x));
+    const minY = Math.min(...punkte.map((p) => p.y));
+    const schrift = Math.max(18, Math.round(sicht.w / 22));
+    overlayCtx.font = "700 " + schrift + "px system-ui, sans-serif";
+    const breite = overlayCtx.measureText(text).width;
+    const padX = schrift * 0.4, hoehe = schrift * 1.5;
+    let boxY = minY - hoehe - linienbreite;
+    if (boxY < sicht.y) boxY = minY + linienbreite; // notfalls unter die Oberkante (sichtbarer Rand)
+    overlayCtx.fillStyle = "rgba(0,0,0,0.75)";
+    overlayCtx.fillRect(minX, boxY, breite + padX * 2, hoehe);
+    overlayCtx.fillStyle = "#ffffff";
+    overlayCtx.textBaseline = "middle";
+    overlayCtx.fillText(text, minX + padX, boxY + hoehe / 2);
+  }
+}
+
+// Kamera-Stream + Schleife des nativen Pfads sauber beenden.
+function stoppeStream() {
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  if (kameraStream) { kameraStream.getTracks().forEach((t) => t.stop()); kameraStream = null; }
+  videoEl.srcObject = null;
+}
+
+async function stoppeScan() {
+  if (!scanLaeuft) return;
+  stoppeStream();
+  if (html5Scanner) {
+    try { await html5Scanner.stop(); await html5Scanner.clear(); } catch (e) {}
+    html5Scanner = null;
+  }
+  scanLaeuft = false;
+  detektor = null;
+  leereOverlayCanvas();        // Live-Markierung entfernen
+  overlayBestEl.hidden = true; // eingeblendete Bestätigungs-Leiste schließen
+  scanBereich.classList.add("aus");
+  document.body.classList.remove("kamera-an"); // Modus-Menü wieder einblenden
+  btnStart.style.display = "block";
+  btnStop.style.display = "none";
+  zeigeStatus("Kamera gestoppt.", "info");
+}
+
+btnStart.addEventListener("click", starteScan);
+btnStop.addEventListener("click", stoppeScan);
+
+// ---------- Event-Verknüpfungen ----------
+document.getElementById("btn-export").addEventListener("click", exportiereCSV);
+document.getElementById("btn-alle-loeschen").addEventListener("click", loescheAlles);
+
+// Manuelle Eingabe: per Button oder Enter-Taste hinzufügen.
+const manuellInput = document.getElementById("manuell-input");
+function manuellHinzufuegen() {
+  let wert = manuellInput.value;
+  // Lenovo-Modus: auch eingetippte/eingefügte Etikettenwerte auf die SN kürzen.
+  // Passt kein Muster, wird die Eingabe unverändert übernommen.
+  if (scanModus === "lenovo") {
+    const sn = extrahiereLenovoSN(wert);
+    if (sn) wert = sn;
+  }
+  erfasseSeriennummer(wert);
+  manuellInput.value = "";
+  manuellInput.focus();
+}
+document.getElementById("btn-manuell").addEventListener("click", manuellHinzufuegen);
+manuellInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); manuellHinzufuegen(); }
+});
+
+// ---------- Längen-Filter: Eingabefelder verdrahten ----------
+const laengeInput = document.getElementById("genaue-laenge");
+const filterHinweisEl = document.getElementById("filter-aktiv-hinweis");
+
+// Zeigt unter dem Feld an, welche Länge gerade gefordert ist.
+function aktualisiereFilterHinweis() {
+  if (scanModus === "lenovo") {
+    filterHinweisEl.textContent = "Im Lenovo-Modus nicht aktiv (SN ist immer 8 Zeichen).";
+    return;
+  }
+  const beschr = beschreibeErlaubteLaenge();
+  filterHinweisEl.textContent = beschr ? "Aktiv – " + beschr + "." : "Keine Längenbegrenzung aktiv.";
+}
+
+// Liest das Feld, übernimmt und speichert den Wert.
+function filterAusFeldernUebernehmen() {
+  const wert = parseInt(laengeInput.value, 10);
+  filterLaenge = Number.isFinite(wert) && wert > 0 ? wert : 0;
+  speichereFilter();
+  aktualisiereFilterHinweis();
+}
+
+laengeInput.addEventListener("input", filterAusFeldernUebernehmen);
+
+// ---------- Scan-Modus: Umschalt-Buttons verdrahten ----------
+const btnModusBarcode = document.getElementById("btn-modus-barcode");
+const btnModusQr = document.getElementById("btn-modus-qr");
+const btnModusLenovo = document.getElementById("btn-modus-lenovo");
+const lenovoHinweisEl = document.getElementById("lenovo-hinweis");
+
+// Hebt den aktiven Modus-Button hervor und blendet den Lenovo-Hinweis ein/aus.
+function aktualisiereModusButtons() {
+  const buttons = { barcode: btnModusBarcode, qr: btnModusQr, lenovo: btnModusLenovo };
+  for (const [modus, btn] of Object.entries(buttons)) {
+    btn.classList.toggle("aktiv", scanModus === modus);
+    btn.setAttribute("aria-pressed", String(scanModus === modus));
+  }
+  lenovoHinweisEl.hidden = scanModus !== "lenovo";
+}
+
+// Modus wechseln; läuft die Kamera bereits, wird sie mit neuem Format neu gestartet.
+async function setzeModus(neu) {
+  if (neu !== "barcode" && neu !== "qr" && neu !== "lenovo") return;
+  if (neu === scanModus) return;
+  scanModus = neu;
+  speichereModus();
+  aktualisiereModusButtons();
+  aktualisiereFilterHinweis();   // Längen-Filter-Anzeige hängt vom Modus ab
+
+  // Zwischenspeicher der Mehrfach-Bestätigung leeren, damit nichts überspringt.
+  kandidatWert = null; kandidatAnzahl = 0; letzterCode = null;
+
+  if (scanLaeuft) {
+    await stoppeScan();
+    await starteScan();
+  } else {
+    zeigeStatus("Modus: " + modusLabel() + ".", "info");
+  }
+}
+
+btnModusBarcode.addEventListener("click", () => setzeModus("barcode"));
+btnModusQr.addEventListener("click", () => setzeModus("qr"));
+btnModusLenovo.addEventListener("click", () => setzeModus("lenovo"));
+
+// ---------- Service Worker registrieren (Offline-Betrieb) ----------
+// Funktioniert nur über HTTPS oder localhost.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch((e) =>
+      console.warn("Service Worker konnte nicht registriert werden:", e)
+    );
+  });
+}
+
+// ---------- Start ----------
+ladeZustand();
+ladeFilter();
+ladeModus();
+aktualisiereModusButtons();
+// Gespeicherten Filterwert ins Feld schreiben (0 = leer lassen).
+laengeInput.value = filterLaenge > 0 ? String(filterLaenge) : "";
+aktualisiereFilterHinweis();
+rendereListe();
+</script>
+</body>
+</html>
